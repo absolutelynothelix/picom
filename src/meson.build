@@ -29,11 +29,13 @@ required_xcb_packages = [
 	'xcb',
 	'xcb-composite',
 	'xcb-damage',
+	'xcb-dri3',
 	'xcb-glx',
 	'xcb-present',
 	'xcb-randr',
 	'xcb-render',
 	'xcb-shape',
+	'xcb-shm',
 	'xcb-sync',
 	'xcb-xfixes',
 ]
@@ -91,6 +93,14 @@ endif
 if get_option('opengl')
 	cflags += ['-DCONFIG_OPENGL']
 	deps += [dependency('epoxy', required: true)]
+endif
+
+if get_option('vulkan')
+	cflags += ['-DCONFIG_VULKAN', '-DVK_USE_PLATFORM_XCB_KHR']
+	deps += [
+		dependency('vulkan', required: true),
+		dependency('shaderc', required: true)
+	]
 endif
 
 if get_option('dbus')

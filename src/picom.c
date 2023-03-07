@@ -28,10 +28,12 @@
 #include <unistd.h>
 #include <xcb/composite.h>
 #include <xcb/damage.h>
+#include <xcb/dri3.h>
 #include <xcb/glx.h>
 #include <xcb/present.h>
 #include <xcb/randr.h>
 #include <xcb/render.h>
+#include <xcb/shm.h>
 #include <xcb/sync.h>
 #include <xcb/xcb_aux.h>
 #include <xcb/xfixes.h>
@@ -2038,6 +2040,8 @@ static session_t *session_init(int argc, char **argv, Display *dpy,
 	xcb_prefetch_extension_data(ps->c.c, &xcb_present_id);
 	xcb_prefetch_extension_data(ps->c.c, &xcb_sync_id);
 	xcb_prefetch_extension_data(ps->c.c, &xcb_glx_id);
+	xcb_prefetch_extension_data(ps->c.c, &xcb_dri3_id);
+	xcb_prefetch_extension_data(ps->c.c, &xcb_shm_id);
 
 	ext_info = xcb_get_extension_data(ps->c.c, &xcb_render_id);
 	if (!ext_info || !ext_info->present) {
@@ -2265,6 +2269,24 @@ static session_t *session_init(int argc, char **argv, Display *dpy,
 		          "enabled.");
 		goto err;
 	}
+
+	ext_info = xcb_get_extension_data(ps->c.c, &xcb_dri3_id);
+	if (ext_info && ext_info->present) {
+		xcb_dri3_query_version_reply_t *r = xcb_dri3_query_version_reply(
+		    ps->c.c,
+		    xcb_dri3_query_version(ps->c.c, XCB_DRI3_MAJOR_VERSION,
+		                           XCB_DRI3_MINOR_VERSION),
+		    NULL);
+		if (r && ((r->major_version == 1 && r->minor_version >= 2) ||
+		          r->major_version > 1)) {
+			ps->dri3_exists = true;
+
+			free(r);
+		}
+	}
+
+	ext_info = xcb_get_extension_data(ps->c.c, &xcb_shm_id);
+	ps->shm_exists = ext_info && ext_info->present;
 
 	bool compositor_running = false;
 	if (session_redirection_mode(ps) == XCB_COMPOSITE_REDIRECT_MANUAL) {
