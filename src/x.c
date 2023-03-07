@@ -15,6 +15,7 @@
 #include <xcb/present.h>
 #include <xcb/randr.h>
 #include <xcb/render.h>
+#include <xcb/shm.h>
 #include <xcb/sync.h>
 #include <xcb/xcb.h>
 #include <xcb/xcb_aux.h>
@@ -222,12 +223,14 @@ static int xerror(Display attr_unused *dpy, XErrorEvent *ev) {
 bool x_extensions_init(struct x_connection *c) {
 	xcb_prefetch_extension_data(c->c, &xcb_composite_id);
 	xcb_prefetch_extension_data(c->c, &xcb_damage_id);
+	xcb_prefetch_extension_data(c->c, &xcb_dri3_id);
 	xcb_prefetch_extension_data(c->c, &xcb_xfixes_id);
 	xcb_prefetch_extension_data(c->c, &xcb_glx_id);
 	xcb_prefetch_extension_data(c->c, &xcb_present_id);
 	xcb_prefetch_extension_data(c->c, &xcb_randr_id);
 	xcb_prefetch_extension_data(c->c, &xcb_render_id);
 	xcb_prefetch_extension_data(c->c, &xcb_shape_id);
+	xcb_prefetch_extension_data(c->c, &xcb_shm_id);
 	xcb_prefetch_extension_data(c->c, &xcb_sync_id);
 
 	// Initialize the X Composite extension.
@@ -274,6 +277,23 @@ bool x_extensions_init(struct x_connection *c) {
 	xcb_discard_reply(c->c, xcb_damage_query_version(c->c, XCB_DAMAGE_MAJOR_VERSION,
 	                                                 XCB_DAMAGE_MINOR_VERSION)
 	                            .sequence);
+
+	// Initialize the X DRI3 extension.
+	extension = xcb_get_extension_data(c->c, &xcb_dri3_id);
+	if (!global_debug_options.disable_dri3 && extension && extension->present) {
+		auto dri3 = xcb_dri3_query_version_reply(
+		    c->c,
+		    xcb_dri3_query_version(c->c, XCB_DRI3_MAJOR_VERSION, XCB_DRI3_MINOR_VERSION),
+		    NULL);
+		if (dri3 && (dri3->major_version > 1 ||
+		             (dri3->major_version == 1 && dri3->minor_version >= 2))) {
+			c->e.has_dri3 = true;
+		}
+
+		if (dri3) {
+			free(dri3);
+		}
+	}
 
 	// Initialize the X Fixes extension.
 	extension = xcb_get_extension_data(c->c, &xcb_xfixes_id);
@@ -327,6 +347,12 @@ bool x_extensions_init(struct x_connection *c) {
 	if (extension && extension->present) {
 		c->e.has_shape = true;
 		c->e.shape_event = extension->first_event;
+	}
+
+	// Initialize the X SHM extension.
+	extension = xcb_get_extension_data(c->c, &xcb_shm_id);
+	if (extension && extension->present) {
+		c->e.has_shm = true;
 	}
 
 	// Initialize the X Sync extension.

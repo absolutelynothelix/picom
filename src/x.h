@@ -50,6 +50,8 @@ struct x_extensions {
 	int damage_event;
 	/// The X Damage extension's base error number.
 	int damage_error;
+	/// The X DRI3 extension's presence.
+	bool has_dri3;
 	/// The X Fixes extension's base error number.
 	int fixes_error;
 	/// The X GLX extension's presence.
@@ -68,6 +70,8 @@ struct x_extensions {
 	bool has_shape;
 	/// The X Shape extension's base event number.
 	int shape_event;
+	/// The X SHM extension's presence.
+	bool has_shm;
 	/// The X Sync extension's presence.
 	bool has_sync;
 	/// The X Sync extension's base event number.

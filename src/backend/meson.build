@@ -12,3 +12,8 @@ subdir('xrender')
 if get_option('opengl')
   subdir('gl')
 endif
+
+# enable vulkan
+if get_option('vulkan')
+  srcs += [ files('vulkan/vulkan.c') ]
+endif
