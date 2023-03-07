@@ -253,6 +253,10 @@ typedef struct session {
 	int xsync_event;
 	/// Error base number for X Sync extension.
 	int xsync_error;
+	/// Whether X DRI3 extension exists.
+	bool dri3_exists;
+	/// Whether X SHM extension exists.
+	bool shm_exists;
 
 	// === Atoms ===
 	struct atom *atoms;
