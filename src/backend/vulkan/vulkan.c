@@ -3,9 +3,9 @@
 #include <vulkan/vulkan.h>
 #include <xcb/dri3.h>
 
-#include "backend/backend.h"
 #include "backend/backend_common.h"
 #include "backend/vulkan/shaders.h"
+#include "backend/vulkan/vulkan.h"
 #include "log.h"
 #include "picom.h"
 
@@ -31,33 +31,29 @@ struct vulkan_data {
 	VkFence acquire_next_image_fence;
 	VkFence queue_submit_fence;
 	VkSemaphore semaphore;
-	uint32_t width;
-	uint32_t height;
 	VkSwapchainKHR swapchain;
 	uint32_t swapchain_image_count;
-	VkImage *swapchain_images;
-	VkImageLayout *swapchain_image_layouts;
-	VkImageView *swapchain_image_views;
+	struct vulkan_image **back_buffers;
 	int32_t *buffer_ages;
 	uint32_t swapchain_image_index;
 	VkDescriptorPool descriptor_pool;
 	VkDescriptorSetLayout descriptor_set_layout;
 	VkSampler sampler;
-	VkPipelineLayout compose_pipeline_layout;
-	VkPipeline compose_pipeline;
+	VkPipelineLayout blit_pipeline_layout;
+	VkPipeline blit_pipeline;
 	VkPipelineLayout fill_pipeline_layout;
 	VkPipeline fill_pipeline;
 	VkCommandPool command_pool;
 	VkCommandBuffer command_buffer;
+	bool command_buffer_began;
 };
 
 struct vulkan_image {
-	int32_t refcount;
 	bool has_alpha;
 	xcb_pixmap_t pixmap;
-	bool owned;
 	uint16_t width;
 	uint16_t height;
+	VkImageLayout image_layout;
 	VkImage image;
 	VkDeviceMemory memory;
 	int32_t shm_id;
@@ -387,15 +383,29 @@ static bool vk_create_device(struct vulkan_data *vd, session_t *session) {
 		.pQueuePriorities = &queue_priority
 	};
 
-	VkPhysicalDeviceDynamicRenderingFeatures physical_device_dynamic_rendering_features = {
-		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES,
+	VkPhysicalDeviceVulkan13Features physical_device_vulkan_1_3_features = {
+		.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES,
 		.pNext = NULL,
-		.dynamicRendering = VK_TRUE
+		.robustImageAccess = VK_FALSE,
+		.inlineUniformBlock = VK_FALSE,
+		.descriptorBindingInlineUniformBlockUpdateAfterBind = VK_FALSE,
+		.pipelineCreationCacheControl = VK_FALSE,
+		.privateData = VK_FALSE,
+		.shaderDemoteToHelperInvocation = VK_FALSE,
+		.shaderTerminateInvocation = VK_FALSE,
+		.subgroupSizeControl = VK_FALSE,
+		.computeFullSubgroups = VK_FALSE,
+		.synchronization2 = VK_TRUE,
+		.textureCompressionASTC_HDR = VK_FALSE,
+		.shaderZeroInitializeWorkgroupMemory = VK_FALSE,
+		.dynamicRendering = VK_TRUE,
+		.shaderIntegerDotProduct = VK_FALSE,
+		.maintenance4 = VK_FALSE
 	};
 
 	VkDeviceCreateInfo device_create_info = {
 		.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
-		.pNext = &physical_device_dynamic_rendering_features,
+		.pNext = &physical_device_vulkan_1_3_features,
 		.flags = 0,
 		.queueCreateInfoCount = 1,
 		.pQueueCreateInfos = &device_queue_create_info,
@@ -483,22 +493,18 @@ static void vk_destroy_swapchain(struct vulkan_data *vd) {
 		free(vd->buffer_ages);
 	}
 
-	if (vd->swapchain_image_views) {
+	if (vd->back_buffers) {
 		for (uint32_t i = 0; i < vd->swapchain_image_count; i++) {
-			if (vd->swapchain_image_views[i] != VK_NULL_HANDLE) {
-				vkDestroyImageView(vd->device, vd->swapchain_image_views[i], NULL);
+			if (vd->back_buffers[i]) {
+				if (vd->back_buffers[i]->image_view != VK_NULL_HANDLE) {
+					vkDestroyImageView(vd->device, vd->back_buffers[i]->image_view, NULL);
+				}
+
+				free(vd->back_buffers[i]);
 			}
 		}
 
-		free(vd->swapchain_image_views);
-	}
-
-	if (vd->swapchain_image_layouts) {
-		free(vd->swapchain_image_layouts);
-	}
-
-	if (vd->swapchain_images) {
-		free(vd->swapchain_images);
+		free(vd->back_buffers);
 	}
 
 	if (vd->swapchain != VK_NULL_HANDLE) {
@@ -514,9 +520,6 @@ static bool vk_create_swapchain(struct vulkan_data *vd, bool is_vsync_enabled) {
 
 		return false;
 	}
-
-	vd->width = surface_capabilities.currentExtent.width;
-	vd->height = surface_capabilities.currentExtent.height;
 
 	uint32_t surface_format_count;
 	if (vkGetPhysicalDeviceSurfaceFormatsKHR(vd->physical_device, vd->surface,
@@ -557,7 +560,7 @@ static bool vk_create_swapchain(struct vulkan_data *vd, bool is_vsync_enabled) {
 		.imageColorSpace = surface_format.colorSpace,
 		.imageExtent = surface_capabilities.currentExtent,
 		.imageArrayLayers = 1,
-		.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
 		.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		.queueFamilyIndexCount = 0,
 		.pQueueFamilyIndices = NULL,
@@ -582,21 +585,25 @@ static bool vk_create_swapchain(struct vulkan_data *vd, bool is_vsync_enabled) {
 		return false;
 	}
 
-	vd->swapchain_images = ccalloc(vd->swapchain_image_count, VkImage);
-	vkGetSwapchainImagesKHR(vd->device, vd->swapchain, &vd->swapchain_image_count,
-		vd->swapchain_images);
+	vd->back_buffers = ccalloc(vd->swapchain_image_count, struct vulkan_image *);
 
-	vd->swapchain_image_layouts = ccalloc(vd->swapchain_image_count, VkImageLayout);
-	vd->swapchain_image_views = ccalloc(vd->swapchain_image_count, VkImageView);
+	VkImage *swapchain_images = ccalloc(vd->swapchain_image_count, VkImage);
+	vkGetSwapchainImagesKHR(vd->device, vd->swapchain, &vd->swapchain_image_count,
+		swapchain_images);
+
 	vd->buffer_ages = ccalloc(vd->swapchain_image_count, int32_t);
 	for (uint32_t i = 0; i < vd->swapchain_image_count; i++) {
-		vd->swapchain_image_layouts[i] = VK_IMAGE_LAYOUT_UNDEFINED;
+		vd->back_buffers[i] = ccalloc(1, struct vulkan_image);
+		vd->back_buffers[i]->width = (uint16_t)surface_capabilities.currentExtent.width;
+		vd->back_buffers[i]->height = (uint16_t)surface_capabilities.currentExtent.height;
+		vd->back_buffers[i]->image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+		vd->back_buffers[i]->image = swapchain_images[i];
 
 		VkImageViewCreateInfo image_view_create_info = {
 			.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
 			.pNext = NULL,
 			.flags = 0,
-			.image = vd->swapchain_images[i],
+			.image = vd->back_buffers[i]->image,
 			.viewType = VK_IMAGE_VIEW_TYPE_2D,
 			.format = VK_FORMAT_B8G8R8A8_UNORM,
 			.components = {
@@ -615,8 +622,10 @@ static bool vk_create_swapchain(struct vulkan_data *vd, bool is_vsync_enabled) {
 		};
 
 		if (vkCreateImageView(vd->device, &image_view_create_info, NULL,
-			&vd->swapchain_image_views[i]) != VK_SUCCESS) {
+			&vd->back_buffers[i]->image_view) != VK_SUCCESS) {
 			log_error("Failed to create image view.");
+
+			free(swapchain_images);
 
 			return false;
 		}
@@ -624,7 +633,9 @@ static bool vk_create_swapchain(struct vulkan_data *vd, bool is_vsync_enabled) {
 		vd->buffer_ages[i] = -1;
 	}
 
-	if (vkAcquireNextImageKHR(vd->device, vd->swapchain, UINT64_MAX, vd->semaphore,
+	free(swapchain_images);
+
+	if (vkAcquireNextImageKHR(vd->device, vd->swapchain, UINT64_MAX, VK_NULL_HANDLE,
 		vd->acquire_next_image_fence, &vd->swapchain_image_index) != VK_SUCCESS) {
 		log_error("Failed to acquire next image.");
 
@@ -798,9 +809,9 @@ static bool vk_create_pipeline_shader_stage_create_infos(struct vulkan_data *vd,
 }
 
 static bool vk_create_pipelines(struct vulkan_data *vd) {
-	VkFormat color_attachment_format = VK_FORMAT_B8G8R8A8_UNORM;
+	VkFormat color_attachment_format = VK_FORMAT_R8G8B8A8_UNORM;
 
-	VkPipelineRenderingCreateInfo compose_pipeline_rendering_create_info = {
+	VkPipelineRenderingCreateInfo blit_pipeline_rendering_create_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO,
 		.pNext = NULL,
 		.viewMask = 0,
@@ -820,14 +831,13 @@ static bool vk_create_pipelines(struct vulkan_data *vd) {
 		.stencilAttachmentFormat = VK_FORMAT_UNDEFINED
 	};
 
-	VkPipelineShaderStageCreateInfo *compose_pipeline_shader_stage_create_infos = ccalloc(2,
+	VkPipelineShaderStageCreateInfo *blit_pipeline_shader_stage_create_infos = ccalloc(2,
 		VkPipelineShaderStageCreateInfo);
 	VkPipelineShaderStageCreateInfo *fill_pipeline_shader_stage_create_infos = ccalloc(2,
 		VkPipelineShaderStageCreateInfo);
 
-	if (!vk_create_pipeline_shader_stage_create_infos(vd, compose_vertex_shader,
-		"compose_vertex_shader", compose_fragment_shader, "compose_fragment_shader",
-		compose_pipeline_shader_stage_create_infos)) {
+	if (!vk_create_pipeline_shader_stage_create_infos(vd, blit_vertex_shader, "blit_vertex_shader",
+		blit_fragment_shader, "blit_fragment_shader", blit_pipeline_shader_stage_create_infos)) {
 		goto err;
 	}
 
@@ -854,11 +864,13 @@ static bool vk_create_pipelines(struct vulkan_data *vd) {
 		.primitiveRestartEnable = VK_FALSE
 	};
 
+	auto back_buffer = (struct vulkan_image *)vk_back_buffer(&vd->base);
+
 	VkViewport viewport = {
 		.x = 0.0F,
 		.y = 0.0F,
-		.width = (float)vd->width,
-		.height = (float)vd->height,
+		.width = (float)back_buffer->width,
+		.height = (float)back_buffer->height,
 		.minDepth = 0.0F,
 		.maxDepth = 0.0F
 	};
@@ -938,34 +950,34 @@ static bool vk_create_pipelines(struct vulkan_data *vd) {
 		.pDynamicStates = &dynamic_state
 	};
 
-	VkPushConstantRange compose_push_constant_range = {
+	VkPushConstantRange blit_push_constant_range = {
 		.stageFlags = VK_SHADER_STAGE_VERTEX_BIT,
 		.offset = 0,
 		.size = 32
 	};
 
-	VkPipelineLayoutCreateInfo compose_pipeline_layout_create_info = {
+	VkPipelineLayoutCreateInfo blit_pipeline_layout_create_info = {
 		.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO,
 		.pNext = NULL,
 		.flags = 0,
 		.setLayoutCount = 1,
 		.pSetLayouts = &vd->descriptor_set_layout,
 		.pushConstantRangeCount = 1,
-		.pPushConstantRanges = &compose_push_constant_range
+		.pPushConstantRanges = &blit_push_constant_range
 	};
 
-	if (vkCreatePipelineLayout(vd->device, &compose_pipeline_layout_create_info, NULL,
-		&vd->compose_pipeline_layout) != VK_SUCCESS) {
+	if (vkCreatePipelineLayout(vd->device, &blit_pipeline_layout_create_info, NULL,
+		&vd->blit_pipeline_layout) != VK_SUCCESS) {
 		log_error("Failed to create pipeline layout.");
 
 		goto err;
 	}
 
-	VkGraphicsPipelineCreateInfo compose_graphics_pipeline_create_info = {
+	VkGraphicsPipelineCreateInfo blit_graphics_pipeline_create_info = {
 		.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO,
-		.pNext = &compose_pipeline_rendering_create_info,
+		.pNext = &blit_pipeline_rendering_create_info,
 		.stageCount = 2,
-		.pStages = compose_pipeline_shader_stage_create_infos,
+		.pStages = blit_pipeline_shader_stage_create_infos,
 		.pVertexInputState = &pipeline_vertex_input_state_create_info,
 		.pInputAssemblyState = &pipeline_input_assembly_state_create_info,
 		.pTessellationState = NULL,
@@ -975,21 +987,21 @@ static bool vk_create_pipelines(struct vulkan_data *vd) {
 		.pDepthStencilState = NULL,
 		.pColorBlendState = &pipeline_color_blend_state_create_info,
 		.pDynamicState = &pipeline_dynamic_state_create_info,
-		.layout = vd->compose_pipeline_layout,
+		.layout = vd->blit_pipeline_layout,
 		.renderPass = NULL,
 		.subpass = 0,
 		.basePipelineHandle = NULL,
 		.basePipelineIndex = 0
 	};
 
-	if (vkCreateGraphicsPipelines(vd->device, NULL, 1, &compose_graphics_pipeline_create_info, NULL,
-		&vd->compose_pipeline) != VK_SUCCESS) {
+	if (vkCreateGraphicsPipelines(vd->device, NULL, 1, &blit_graphics_pipeline_create_info, NULL,
+		&vd->blit_pipeline) != VK_SUCCESS) {
 		log_error("Failed to create graphics pipelines.");
 
 		goto err;
 	}
 
-	vk_destroy_pipeline_shader_stage_create_infos(vd, compose_pipeline_shader_stage_create_infos);
+	vk_destroy_pipeline_shader_stage_create_infos(vd, blit_pipeline_shader_stage_create_infos);
 
 	VkPushConstantRange fill_push_constant_ranges[] = {
 		{
@@ -1055,7 +1067,7 @@ static bool vk_create_pipelines(struct vulkan_data *vd) {
 
 err:
 	vk_destroy_pipeline_shader_stage_create_infos(vd, fill_pipeline_shader_stage_create_infos);
-	vk_destroy_pipeline_shader_stage_create_infos(vd, compose_pipeline_shader_stage_create_infos);
+	vk_destroy_pipeline_shader_stage_create_infos(vd, blit_pipeline_shader_stage_create_infos);
 
 	return false;
 }
@@ -1090,6 +1102,8 @@ static bool vk_create_command_pool(struct vulkan_data *vd) {
 		return false;
 	}
 
+	vd->command_buffer_began = false;
+
 	return true;
 }
 
@@ -1116,12 +1130,12 @@ static void vk_deinit(backend_t *base) {
 		vkDestroyPipelineLayout(vd->device, vd->fill_pipeline_layout, NULL);
 	}
 
-	if (vd->compose_pipeline != VK_NULL_HANDLE) {
-		vkDestroyPipeline(vd->device, vd->compose_pipeline, NULL);
+	if (vd->blit_pipeline != VK_NULL_HANDLE) {
+		vkDestroyPipeline(vd->device, vd->blit_pipeline, NULL);
 	}
 
-	if (vd->compose_pipeline_layout != VK_NULL_HANDLE) {
-		vkDestroyPipelineLayout(vd->device, vd->compose_pipeline_layout, NULL);
+	if (vd->blit_pipeline_layout != VK_NULL_HANDLE) {
+		vkDestroyPipelineLayout(vd->device, vd->blit_pipeline_layout, NULL);
 	}
 
 	if (vd->sampler != VK_NULL_HANDLE) {
@@ -1211,8 +1225,141 @@ err:
 	return NULL;
 }
 
-static void vk_prepare(backend_t *base, const region_t *region) {
-	auto vd = (struct vulkan_data *)base;
+static void vk_transit_image_layout(struct vulkan_data *vd, struct vulkan_image *vi,
+	VkImageLayout image_layout) {
+	if (vi->image_layout == image_layout) {
+		return;
+	}
+
+	VkPipelineStageFlags2 src_stage_mask;
+	VkAccessFlags2 src_access_mask;
+	switch (vi->image_layout) {
+		case VK_IMAGE_LAYOUT_UNDEFINED:
+		case VK_IMAGE_LAYOUT_PREINITIALIZED:
+		case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+			src_stage_mask = VK_PIPELINE_STAGE_2_NONE;
+			src_access_mask = VK_ACCESS_2_NONE;
+			break;
+
+		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+			src_stage_mask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+			src_access_mask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT
+				| VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+			src_stage_mask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+			src_access_mask = VK_ACCESS_2_TRANSFER_READ_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+			src_stage_mask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT;
+			src_access_mask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+			break;
+
+		default:
+			unreachable();
+	}
+
+	VkPipelineStageFlags2 dst_stage_mask;
+	VkAccessFlags2 dst_access_mask;
+	switch (image_layout) {
+		case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+			dst_stage_mask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+			dst_access_mask = VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT
+				| VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+			dst_stage_mask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+			dst_access_mask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+			dst_stage_mask = VK_PIPELINE_STAGE_2_BLIT_BIT;
+			dst_access_mask = VK_ACCESS_2_TRANSFER_READ_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+			dst_stage_mask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT;
+			dst_access_mask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
+			break;
+
+		case VK_IMAGE_LAYOUT_PRESENT_SRC_KHR:
+			dst_stage_mask = VK_PIPELINE_STAGE_2_NONE;
+			dst_access_mask = VK_ACCESS_2_NONE;
+			break;
+
+		default:
+			unreachable();
+	}
+
+	VkImageMemoryBarrier2 image_memory_barrier = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+		.pNext = NULL,
+		.srcStageMask = src_stage_mask,
+		.srcAccessMask = src_access_mask,
+		.dstStageMask = dst_stage_mask,
+		.dstAccessMask = dst_access_mask,
+		.oldLayout = vi->image_layout,
+		.newLayout = image_layout,
+		.srcQueueFamilyIndex = 0,
+		.dstQueueFamilyIndex = 0,
+		.image = vi->image,
+		.subresourceRange = {
+			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1
+		}
+	};
+
+	VkDependencyInfo dependency_info = {
+		.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO,
+		.pNext = NULL,
+		.dependencyFlags = 0,
+		.memoryBarrierCount = 0,
+		.pMemoryBarriers = NULL,
+		.bufferMemoryBarrierCount = 0,
+		.pBufferMemoryBarriers = NULL,
+		.imageMemoryBarrierCount = 1,
+		.pImageMemoryBarriers = &image_memory_barrier
+	};
+
+	vkCmdPipelineBarrier2(vd->command_buffer, &dependency_info);
+
+	vi->image_layout = image_layout;
+}
+
+static void vk_end_and_submit_command_buffer(struct vulkan_data *vd) {
+	if (vkEndCommandBuffer(vd->command_buffer) != VK_SUCCESS) {
+		log_error("Failed to end command buffer.");
+	}
+
+	VkSubmitInfo submit_info = {
+		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+		.pNext = NULL,
+		.waitSemaphoreCount = 0,
+		.pWaitSemaphores = NULL,
+		.pWaitDstStageMask = NULL,
+		.commandBufferCount = 1,
+		.pCommandBuffers = &vd->command_buffer,
+		.signalSemaphoreCount = 1,
+		.pSignalSemaphores = &vd->semaphore
+	};
+
+	if (vkQueueSubmit(vd->queue, 1, &submit_info, vd->queue_submit_fence) != VK_SUCCESS) {
+		log_error("Failed to queue submit.");
+	}
+
+	vd->command_buffer_began = false;
+}
+
+static void vk_begin_command_buffer(struct vulkan_data *vd) {
+	if (vd->command_buffer_began) {
+		return;
+	}
 
 	if (vkWaitForFences(vd->device, 1, &vd->queue_submit_fence, VK_TRUE, UINT64_MAX)
 		!= VK_SUCCESS) {
@@ -1238,322 +1385,22 @@ static void vk_prepare(backend_t *base, const region_t *region) {
 		log_error("Failed to begin command buffer.");
 	}
 
-	VkImageMemoryBarrier image_memory_barrier = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.pNext = NULL,
-		.srcAccessMask = VK_ACCESS_NONE,
-		.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-		.oldLayout = vd->swapchain_image_layouts[vd->swapchain_image_index],
-		.newLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		.image = vd->swapchain_images[vd->swapchain_image_index],
-		.subresourceRange = {
-			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1
-		}
-	};
-
-	vkCmdPipelineBarrier(vd->command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-		VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 0, 0, NULL, 0, NULL, 1,
-		&image_memory_barrier);
-
-	vd->swapchain_image_layouts[vd->swapchain_image_index]
-		= VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-
-	(void)region;
+	vd->command_buffer_began = true;
 }
 
-static void vk_compose(backend_t *base, image_handle image, coord_t image_coords, image_handle mask,
-	coord_t mask_coords, const region_t *reg_paint, const region_t *reg_visible) {
+static void vk_prepare(backend_t *base, const region_t *region attr_unused) {
 	auto vd = (struct vulkan_data *)base;
 
-	int32_t n_rects;
-	pixman_box32_t *rects = pixman_region32_rectangles(reg_paint, &n_rects);
-	if (n_rects < 1) {
-		assert(n_rects >= 0);
-
-		return;
-	}
-
-	auto bi = (struct backend_image *)image;
-	auto vi = (struct vulkan_image *)bi->inner;
-
-	pixman_box32_t *extents = pixman_region32_extents(reg_paint);
-
-	if (vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_SHM) {
-		int16_t x = (int16_t)(extents->x1 - image_coords.x);
-		int16_t y = (int16_t)(extents->y1 - image_coords.y);
-		uint16_t width = (uint16_t)(extents->x2 - extents->x1);
-		uint16_t height = (uint16_t)(extents->y2 - extents->y1);
-		xcb_shm_get_image_reply_t *r = xcb_shm_get_image_reply(base->c->c, xcb_shm_get_image(
-			base->c->c, vi->pixmap, x, y, width, height, UINT32_MAX, XCB_IMAGE_FORMAT_Z_PIXMAP,
-			vi->shm_segment, 0), NULL);
-		if (!r) {
-			log_error("Failed to read image data into shared memory image.");
-		} else {
-			free(r);
-		}
-
-		VkImageMemoryBarrier image_memory_barrier_a = {
-			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-			.pNext = NULL,
-			.srcAccessMask = VK_ACCESS_SHADER_READ_BIT,
-			.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-			.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.image = vi->image,
-			.subresourceRange = {
-				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-				.baseMipLevel = 0,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			}
-		};
-
-		vkCmdPipelineBarrier(vd->command_buffer, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
-			VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier_a);
-
-		VkBufferImageCopy buffer_image_copy = {
-			.bufferOffset = 0,
-			.bufferRowLength = 0,
-			.bufferImageHeight = 0,
-			.imageSubresource = {
-				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-				.mipLevel = 0,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			},
-			.imageOffset = {
-				.x = x,
-				.y = y,
-				.z = 0
-			},
-			.imageExtent = {
-				.width = width,
-				.height = height,
-				.depth = 1
-			}
-		};
-
-		vkCmdCopyBufferToImage(vd->command_buffer, vi->staging_buffer, vi->image,
-			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &buffer_image_copy);
-
-		VkImageMemoryBarrier image_memory_barrier_b = {
-			.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-			.pNext = NULL,
-			.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT,
-			.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-			.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-			.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-			.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-			.image = vi->image,
-			.subresourceRange = {
-				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-				.baseMipLevel = 0,
-				.levelCount = 1,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			}
-		};
-
-		vkCmdPipelineBarrier(vd->command_buffer, VK_PIPELINE_STAGE_TRANSFER_BIT,
-			VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier_b);
-	}
-
-	VkRect2D render_area = {
-		.offset = {
-			.x = extents->x1,
-			.y = extents->y1
-		},
-		.extent = {
-			.width = (uint32_t)(extents->x2 - extents->x1),
-			.height = (uint32_t)(extents->y2 - extents->y1)
-		}
-	};
-
-	VkRenderingAttachmentInfo rendering_attachment_info = {
-		.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-		.pNext = NULL,
-		.imageView = vd->swapchain_image_views[vd->swapchain_image_index],
-		.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		.resolveMode = VK_RESOLVE_MODE_NONE,
-		.resolveImageView = NULL,
-		.resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-		.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-		.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-		.clearValue = {
-			0.0F,
-			0.0F,
-			0.0F,
-			0.0F
-		}
-	};
-
-	VkRenderingInfo rendering_info = {
-		.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-		.pNext = NULL,
-		.flags = 0,
-		.renderArea = render_area,
-		.layerCount = 1,
-		.viewMask = 0,
-		.colorAttachmentCount = 1,
-		.pColorAttachments = &rendering_attachment_info,
-		.pDepthAttachment = NULL,
-		.pStencilAttachment = NULL
-	};
-
-	vkCmdBeginRendering(vd->command_buffer, &rendering_info);
-
-	vkCmdBindPipeline(vd->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vd->compose_pipeline);
-	vkCmdSetScissor(vd->command_buffer, 0, 1, &render_area);
-	vkCmdBindDescriptorSets(vd->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
-		vd->compose_pipeline_layout, 0, 1, &vi->descriptor_set, 0, NULL);
-	vkCmdPushConstants(vd->command_buffer, vd->compose_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
-		0, 8, (uint32_t[]){vd->width, vd->height});
-	vkCmdPushConstants(vd->command_buffer, vd->compose_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
-		24, 8, (int32_t[]){image_coords.x, image_coords.y});
-	for (uint32_t i = 0; i < (uint32_t)n_rects; i++) {
-		vkCmdPushConstants(vd->command_buffer, vd->compose_pipeline_layout,
-			VK_SHADER_STAGE_VERTEX_BIT, 8, 16, (int32_t[]){rects[i].x1, rects[i].y1, rects[i].x2,
-			rects[i].y2});
-		vkCmdDraw(vd->command_buffer, 4, 1, 0, 0);
-	}
-
-	vkCmdEndRendering(vd->command_buffer);
-
-	(void)mask;
-	(void)mask_coords;
-	(void)reg_visible;
+	vk_begin_command_buffer(vd);
 }
 
-static void vk_fill(backend_t *base, struct color color, const region_t *region) {
+static bool vk_present(backend_t *base) {
 	auto vd = (struct vulkan_data *)base;
 
-	int32_t n_rects;
-	pixman_box32_t *rects = pixman_region32_rectangles(region, &n_rects);
-	if (n_rects < 1) {
-		assert(n_rects >= 0);
+	vk_transit_image_layout(vd, (struct vulkan_image *)vk_back_buffer(base),
+		VK_IMAGE_LAYOUT_PRESENT_SRC_KHR);
 
-		return;
-	}
-
-	pixman_box32_t *extents = pixman_region32_extents(region);
-
-	VkRect2D render_area = {
-		.offset = {
-			.x = extents->x1,
-			.y = extents->y1
-		},
-		.extent = {
-			.width = (uint32_t)(extents->x2 - extents->x1),
-			.height = (uint32_t)(extents->y2 - extents->y1)
-		}
-	};
-
-	VkRenderingAttachmentInfo rendering_attachment_info = {
-		.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
-		.pNext = NULL,
-		.imageView = vd->swapchain_image_views[vd->swapchain_image_index],
-		.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		.resolveMode = VK_RESOLVE_MODE_NONE,
-		.resolveImageView = NULL,
-		.resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-		.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
-		.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
-		.clearValue = {
-			0.0F,
-			0.0F,
-			0.0F,
-			0.0F
-		}
-	};
-
-	VkRenderingInfo rendering_info = {
-		.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
-		.pNext = NULL,
-		.flags = 0,
-		.renderArea = render_area,
-		.layerCount = 1,
-		.viewMask = 0,
-		.colorAttachmentCount = 1,
-		.pColorAttachments = &rendering_attachment_info,
-		.pDepthAttachment = NULL,
-		.pStencilAttachment = NULL
-	};
-
-	vkCmdBeginRendering(vd->command_buffer, &rendering_info);
-
-	vkCmdBindPipeline(vd->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vd->fill_pipeline);
-	vkCmdSetScissor(vd->command_buffer, 0, 1, &render_area);
-	vkCmdPushConstants(vd->command_buffer, vd->fill_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
-		8, (uint32_t[]){vd->width, vd->height});
-	vkCmdPushConstants(vd->command_buffer, vd->fill_pipeline_layout, VK_SHADER_STAGE_FRAGMENT_BIT,
-		32, 16, (float[]){(float)color.red, (float)color.green, (float)color.blue,
-		(float)color.alpha});
-	for (uint32_t i = 0; i < (uint32_t)n_rects; i++) {
-		vkCmdPushConstants(vd->command_buffer, vd->fill_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
-			8, 16, (int32_t[]){rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2});
-		vkCmdDraw(vd->command_buffer, 4, 1, 0, 0);
-	}
-
-	vkCmdEndRendering(vd->command_buffer);
-}
-
-static void vk_present(backend_t *base, const region_t *region) {
-	auto vd = (struct vulkan_data *)base;
-
-	VkImageMemoryBarrier image_memory_barrier = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.pNext = NULL,
-		.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-		.dstAccessMask = VK_ACCESS_NONE,
-		.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-		.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
-		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		.image = vd->swapchain_images[vd->swapchain_image_index],
-		.subresourceRange = {
-			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1
-		}
-	};
-
-	vkCmdPipelineBarrier(vd->command_buffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-		VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier);
-
-	vd->swapchain_image_layouts[vd->swapchain_image_index] = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
-
-	if (vkEndCommandBuffer(vd->command_buffer) != VK_SUCCESS) {
-		log_error("Failed to end command buffer.");
-	}
-
-	VkPipelineStageFlags wait_dst_stage_mask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-	VkSubmitInfo submit_info = {
-		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-		.pNext = NULL,
-		.waitSemaphoreCount = 1,
-		.pWaitSemaphores = &vd->semaphore,
-		.pWaitDstStageMask = &wait_dst_stage_mask,
-		.commandBufferCount = 1,
-		.pCommandBuffers = &vd->command_buffer,
-		.signalSemaphoreCount = 1,
-		.pSignalSemaphores = &vd->semaphore
-	};
-
-	if (vkQueueSubmit(vd->queue, 1, &submit_info, vd->queue_submit_fence) != VK_SUCCESS) {
-		log_error("Failed to queue submit.");
-	}
+	vk_end_and_submit_command_buffer(vd);
 
 	VkPresentInfoKHR present_info = {
 		.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
@@ -1577,7 +1424,7 @@ static void vk_present(backend_t *base, const region_t *region) {
 		}
 	}
 
-	if (vkAcquireNextImageKHR(vd->device, vd->swapchain, UINT64_MAX, vd->semaphore,
+	if (vkAcquireNextImageKHR(vd->device, vd->swapchain, UINT64_MAX, VK_NULL_HANDLE,
 		vd->acquire_next_image_fence, &vd->swapchain_image_index) != VK_SUCCESS) {
 		log_error("Failed to acquire next image.");
 	}
@@ -1591,7 +1438,417 @@ static void vk_present(backend_t *base, const region_t *region) {
 		log_error("Failed to reset fences.");
 	}
 
-	(void)region;
+	return true;
+}
+
+static bool vk_is_format_supported(backend_t *base attr_unused,
+	enum backend_image_format format attr_unused) {
+	return true;
+}
+
+static bool vk_blit(backend_t *base, struct coord origin, image_handle image,
+	struct backend_blit_args *args) {
+	auto vd = (struct vulkan_data *)base;
+
+	auto source = (struct vulkan_image *)args->source_image;
+	auto destination = (struct vulkan_image *)image;
+
+	pixman_region32_t region;
+	pixman_region32_init_rect(&region, 0, 0, destination->width, destination->height);
+	pixman_region32_translate(&region, -origin.x, -origin.y);
+	pixman_region32_intersect(&region, &region, &args->mask->region);
+
+	int32_t n_rects;
+	pixman_box32_t *rects = pixman_region32_rectangles(&region, &n_rects);
+	if (n_rects < 1) {
+		pixman_region32_fini(&region);
+
+		assert(n_rects == 0);
+
+		return true;
+	}
+
+	if (source->pixmap != XCB_NONE && vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_SHM) {
+		int16_t x = 0;
+		int16_t y = 0;
+		uint16_t width = source->width;
+		uint16_t height = source->height;
+		xcb_shm_get_image_reply_t *r = xcb_shm_get_image_reply(base->c->c, xcb_shm_get_image(
+			base->c->c, source->pixmap, x, y, width, height, UINT32_MAX, XCB_IMAGE_FORMAT_Z_PIXMAP,
+			source->shm_segment, 0), NULL);
+		if (!r) {
+			log_error("Failed to read image data into shared memory image.");
+		} else {
+			free(r);
+		}
+
+		vk_transit_image_layout(vd, source, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+		VkBufferImageCopy buffer_image_copy = {
+			.bufferOffset = 0,
+			.bufferRowLength = 0,
+			.bufferImageHeight = 0,
+			.imageSubresource = {
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.mipLevel = 0,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			},
+			.imageOffset = {
+				.x = x,
+				.y = y,
+				.z = 0
+			},
+			.imageExtent = {
+				.width = width,
+				.height = height,
+				.depth = 1
+			}
+		};
+
+		vkCmdCopyBufferToImage(vd->command_buffer, source->staging_buffer, source->image,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &buffer_image_copy);
+	}
+
+	vk_transit_image_layout(vd, source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+	vk_transit_image_layout(vd, destination, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
+
+	pixman_box32_t *extents = pixman_region32_extents(&region);
+
+	VkRect2D render_area = {
+		.offset = {
+			.x = origin.x + extents->x1,
+			.y = origin.y + extents->y1
+		},
+		.extent = {
+			.width = (uint32_t)(extents->x2 - extents->x1),
+			.height = (uint32_t)(extents->y2 - extents->y1)
+		}
+	};
+
+	VkRenderingAttachmentInfo rendering_attachment_info = {
+		.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+		.pNext = NULL,
+		.imageView = destination->image_view,
+		.imageLayout = destination->image_layout,
+		.resolveMode = VK_RESOLVE_MODE_NONE,
+		.resolveImageView = NULL,
+		.resolveImageLayout = VK_IMAGE_LAYOUT_UNDEFINED,
+		.loadOp = VK_ATTACHMENT_LOAD_OP_LOAD,
+		.storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+		.clearValue = {
+			0.0F,
+			0.0F,
+			0.0F,
+			0.0F
+		}
+	};
+
+	VkRenderingInfo rendering_info = {
+		.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+		.pNext = NULL,
+		.flags = 0,
+		.renderArea = render_area,
+		.layerCount = 1,
+		.viewMask = 0,
+		.colorAttachmentCount = 1,
+		.pColorAttachments = &rendering_attachment_info,
+		.pDepthAttachment = NULL,
+		.pStencilAttachment = NULL
+	};
+
+	vkCmdBeginRendering(vd->command_buffer, &rendering_info);
+
+	vkCmdBindPipeline(vd->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS, vd->blit_pipeline);
+	vkCmdSetScissor(vd->command_buffer, 0, 1, &render_area);
+	vkCmdBindDescriptorSets(vd->command_buffer, VK_PIPELINE_BIND_POINT_GRAPHICS,
+		vd->blit_pipeline_layout, 0, 1, &source->descriptor_set, 0, NULL);
+	vkCmdPushConstants(vd->command_buffer, vd->blit_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+		8, (uint32_t[]){destination->width, destination->height});
+	vkCmdPushConstants(vd->command_buffer, vd->blit_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 24,
+		8, (int32_t[]){origin.x, origin.y});
+	for (uint32_t i = 0; i < (uint32_t)n_rects; i++) {
+		pixman_box32_t rect = region_translate_rect(rects[i], args->mask->origin);
+		vkCmdPushConstants(vd->command_buffer, vd->blit_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
+			8, 16, (int32_t[]){rect.x1, rect.y1, rect.x2, rect.y2});
+		vkCmdDraw(vd->command_buffer, 4, 1, 0, 0);
+	}
+
+	vkCmdEndRendering(vd->command_buffer);
+
+	pixman_region32_fini(&region);
+
+	return true;
+}
+
+static bool vk_copy_area(backend_t *base, struct coord origin, image_handle _destination, image_handle _source,
+	const region_t *_region) {
+	auto vd = (struct vulkan_data *)base;
+
+	auto source = (struct vulkan_image *)_source;
+	auto destination = (struct vulkan_image *)_destination;
+
+	pixman_region32_t region;
+	pixman_region32_init_rect(&region, 0, 0, destination->width, destination->height);
+	pixman_region32_translate(&region, -origin.x, -origin.y);
+	pixman_region32_intersect(&region, &region, _region);
+
+	int32_t n_rects;
+	pixman_box32_t *rects = pixman_region32_rectangles(&region, &n_rects);
+	if (n_rects < 1) {
+		pixman_region32_fini(&region);
+
+		assert(n_rects == 0);
+
+		return true;
+	}
+
+	VkImageBlit *image_blits = ccalloc(n_rects, VkImageBlit);
+	for (uint32_t i = 0; i < (uint32_t)n_rects; i++) {
+		image_blits[i] = (VkImageBlit){
+			.srcSubresource = {
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.mipLevel = 0,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			},
+			.srcOffsets = {
+				{
+					.x = rects[i].x1,
+					.y = rects[i].y1,
+					.z = 0
+				},
+				{
+					.x = rects[i].x2,
+					.y = rects[i].y2,
+					.z = 1
+				}
+			},
+			.dstSubresource = {
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.mipLevel = 0,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			},
+			.dstOffsets = {
+				{
+					.x = origin.x + rects[i].x1,
+					.y = origin.y + rects[i].y1,
+					.z = 0
+				},
+				{
+					.x = origin.x + rects[i].x2,
+					.y = origin.y + rects[i].y2,
+					.z = 1
+				}
+			}
+		};
+	}
+
+	vk_transit_image_layout(vd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+	vk_transit_image_layout(vd, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+	vkCmdBlitImage(vd->command_buffer, source->image, source->image_layout, destination->image,
+		destination->image_layout, (uint32_t)n_rects, image_blits, VK_FILTER_NEAREST);
+
+	free(image_blits);
+
+	pixman_region32_fini(&region);
+
+	return true;
+}
+
+static bool vk_copy_area_quantize(backend_t *base, struct coord origin, image_handle destination, image_handle source,
+	const region_t *region) {
+	return vk_copy_area(base, origin, destination, source, region);
+}
+
+static bool vk_clear(backend_t *base, image_handle _image, struct color color) {
+	auto vd = (struct vulkan_data *)base;
+
+	auto image = (struct vulkan_image *)_image;
+
+	vk_begin_command_buffer(vd);
+
+	vk_transit_image_layout(vd, image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+	VkClearColorValue clear_color_value = {
+		(float)color.red,
+		(float)color.green,
+		(float)color.blue,
+		(float)color.alpha
+	};
+
+	VkImageSubresourceRange image_subresource_range = {
+		.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+		.baseMipLevel = 0,
+		.levelCount = 1,
+		.baseArrayLayer = 0,
+		.layerCount = 1
+	};
+
+	vkCmdClearColorImage(vd->command_buffer, image->image, image->image_layout, &clear_color_value,
+		1, &image_subresource_range);
+
+	return true;
+}
+
+static image_handle vk_new_image(backend_t *base, enum backend_image_format format attr_unused,
+	geometry_t geometry) {
+	auto vd = (struct vulkan_data *)base;
+
+	struct vulkan_image *vi = ccalloc(1, struct vulkan_image);
+	vi->has_alpha = true;
+	vi->pixmap = XCB_NONE;
+	vi->width = (uint16_t)geometry.width;
+	vi->height = (uint16_t)geometry.height;
+	vi->image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+	VkImageCreateInfo image_create_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+		.pNext = NULL,
+		.flags = 0,
+		.imageType = VK_IMAGE_TYPE_2D,
+		.format = VK_FORMAT_R8G8B8A8_UNORM,
+		.extent = {
+			.width = vi->width,
+			.height = vi->height,
+			.depth = 1
+		},
+		.mipLevels = 1,
+		.arrayLayers = 1,
+		.samples = VK_SAMPLE_COUNT_1_BIT,
+		.tiling = VK_IMAGE_TILING_OPTIMAL,
+		.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT
+			| VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
+		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+		.queueFamilyIndexCount = 0,
+		.pQueueFamilyIndices = NULL,
+		.initialLayout = vi->image_layout
+	};
+
+	if (vkCreateImage(vd->device, &image_create_info, NULL, &vi->image) != VK_SUCCESS) {
+		log_error("Failed to create image.");
+
+		return NULL;
+	}
+
+	VkMemoryRequirements memory_requirements;
+	vkGetImageMemoryRequirements(vd->device, vi->image, &memory_requirements);
+
+	VkPhysicalDeviceMemoryProperties physical_device_memory_properties;
+	vkGetPhysicalDeviceMemoryProperties(vd->physical_device, &physical_device_memory_properties);
+
+	uint32_t memory_type_index = UINT32_MAX;
+	for (uint32_t i = 0; i < physical_device_memory_properties.memoryTypeCount; i++) {
+		bool is_supported = memory_requirements.memoryTypeBits & (i << 1);
+		bool has_device_local_bit_set
+			= physical_device_memory_properties.memoryTypes[i].propertyFlags
+			& VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+		if (is_supported && has_device_local_bit_set) {
+			memory_type_index = i;
+
+			break;
+		}
+	}
+
+	if (memory_type_index == UINT32_MAX) {
+		log_error("Failed to find suitable memory type.");
+
+		return NULL;
+	}
+
+	VkMemoryAllocateInfo memory_allocate_info = {
+		.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+		.pNext = NULL,
+		.allocationSize = memory_requirements.size,
+		.memoryTypeIndex = memory_type_index
+	};
+
+	if (vkAllocateMemory(vd->device, &memory_allocate_info, NULL, &vi->memory) != VK_SUCCESS) {
+		log_error("Failed to allocate memory.");
+
+		return NULL;
+	}
+
+	if (vkBindImageMemory(vd->device, vi->image, vi->memory, 0) != VK_SUCCESS) {
+		log_error("Failed to bind image memory.");
+
+		return NULL;
+	}
+
+	VkImageViewCreateInfo image_view_create_info = {
+		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+		.pNext = NULL,
+		.flags = 0,
+		.image = vi->image,
+		.viewType = VK_IMAGE_VIEW_TYPE_2D,
+		.format = VK_FORMAT_R8G8B8A8_UNORM,
+		.components = {
+			.r = VK_COMPONENT_SWIZZLE_R,
+			.g = VK_COMPONENT_SWIZZLE_G,
+			.b = VK_COMPONENT_SWIZZLE_B,
+			.a = vi->has_alpha ? VK_COMPONENT_SWIZZLE_A : VK_COMPONENT_SWIZZLE_ONE
+		},
+		.subresourceRange = {
+			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+			.baseMipLevel = 0,
+			.levelCount = 1,
+			.baseArrayLayer = 0,
+			.layerCount = 1
+		}
+	};
+
+	if (vkCreateImageView(vd->device, &image_view_create_info, NULL, &vi->image_view)
+		!= VK_SUCCESS) {
+		log_error("Failed to create image view.");
+
+		return NULL;
+	}
+
+	VkDescriptorSetAllocateInfo descriptor_set_allocate_info = {
+		.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+		.pNext = NULL,
+		.descriptorPool = vd->descriptor_pool,
+		.descriptorSetCount = 1,
+		.pSetLayouts = &vd->descriptor_set_layout
+	};
+
+	if (vkAllocateDescriptorSets(vd->device, &descriptor_set_allocate_info, &vi->descriptor_set)
+		!= VK_SUCCESS) {
+		log_error("Failed to allocate descriptor sets.");
+
+		return NULL;
+	}
+
+	VkDescriptorImageInfo descriptor_image_info = {
+		.sampler = vd->sampler,
+		.imageView = vi->image_view,
+		.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL
+	};
+
+	VkWriteDescriptorSet write_descriptor_set = {
+		.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+		.pNext = NULL,
+		.dstSet = vi->descriptor_set,
+		.dstBinding = 0,
+		.dstArrayElement = 0,
+		.descriptorCount = 1,
+		.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+		.pImageInfo = &descriptor_image_info,
+		.pBufferInfo = NULL,
+		.pTexelBufferView = NULL
+	};
+
+	vkUpdateDescriptorSets(vd->device, 1, &write_descriptor_set, 0, NULL);
+
+	return (image_handle)vi;
+}
+
+static image_handle vk_back_buffer(backend_t *base) {
+	auto vd = (struct vulkan_data *)base;
+
+	return (image_handle)vd->back_buffers[vd->swapchain_image_index];
 }
 
 static bool vk_bind_pixmap_dri3(struct vulkan_data *vd, struct vulkan_image *vi) {
@@ -1633,6 +1890,8 @@ static bool vk_bind_pixmap_dri3(struct vulkan_data *vd, struct vulkan_image *vi)
 		.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
 	};
 
+	vi->image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
+
 	VkImageCreateInfo image_create_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 		.pNext = &external_memory_image_create_info,
@@ -1652,7 +1911,7 @@ static bool vk_bind_pixmap_dri3(struct vulkan_data *vd, struct vulkan_image *vi)
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		.queueFamilyIndexCount = 0,
 		.pQueueFamilyIndices = NULL,
-		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+		.initialLayout = vi->image_layout
 	};
 
 	if (vkCreateImage(vd->device, &image_create_info, NULL, &vi->image) != VK_SUCCESS) {
@@ -1775,6 +2034,8 @@ static bool vk_bind_pixmap_shm(struct vulkan_data *vd, struct vulkan_image *vi) 
 	vi->height = r->height;
 	free(r);
 
+	vi->image_layout = VK_IMAGE_LAYOUT_PREINITIALIZED;
+
 	VkImageCreateInfo image_create_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
 		.pNext = NULL,
@@ -1794,7 +2055,7 @@ static bool vk_bind_pixmap_shm(struct vulkan_data *vd, struct vulkan_image *vi) 
 		.sharingMode = VK_SHARING_MODE_EXCLUSIVE,
 		.queueFamilyIndexCount = 0,
 		.pQueueFamilyIndices = NULL,
-		.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED
+		.initialLayout = vi->image_layout
 	};
 
 	if (vkCreateImage(vd->device, &image_create_info, NULL, &vi->image) != VK_SUCCESS) {
@@ -1967,16 +2228,10 @@ static bool vk_bind_pixmap_shm(struct vulkan_data *vd, struct vulkan_image *vi) 
 	return true;
 }
 
-static void vk_release_image(backend_t *base, image_handle image) {
+static xcb_pixmap_t vk_release_image(backend_t *base, image_handle image) {
 	auto vd = (struct vulkan_data *)base;
 
-	auto bi = (struct backend_image *)image;
-	auto vi = (struct vulkan_image *)bi->inner;
-	free(bi);
-
-	if (--vi->refcount > 0) {
-		return;
-	}
+	auto vi = (struct vulkan_image *)image;
 
 	if (vkDeviceWaitIdle(vd->device) != VK_SUCCESS) {
 		log_error("Failed to wait for device idle.");
@@ -2002,33 +2257,22 @@ static void vk_release_image(backend_t *base, image_handle image) {
 		vkFreeMemory(vd->device, vi->memory, NULL);
 	}
 
-	if (vi->owned && vi->pixmap != XCB_NONE) {
-		xcb_free_pixmap(base->c->c, vi->pixmap);
-	}
+	xcb_pixmap_t pixmap = vi->pixmap;
 
 	free(vi);
+
+	return pixmap;
 }
 
 static image_handle vk_bind_pixmap(backend_t *base, xcb_pixmap_t pixmap,
-	struct xvisual_info visual_info, bool owned) {
+	struct xvisual_info visual_info) {
 	auto vd = (struct vulkan_data *)base;
 
 	log_debug("Binding pixmap %#08x...", pixmap);
 
 	struct vulkan_image *vi = ccalloc(1, struct vulkan_image);
-	vi->refcount = 1;
 	vi->has_alpha = visual_info.alpha_size > 0;
 	vi->pixmap = pixmap;
-	vi->owned = owned;
-
-	struct backend_image *bi = cmalloc(struct backend_image);
-	bi->inner = (struct backend_image_inner_base *)vi;
-	bi->opacity = 1.0;
-	bi->dim = 0.0;
-	bi->max_brightness = 1.0;
-	bi->corner_radius = 0.0;
-	bi->color_inverted = false;
-	bi->border_width = 0;
 
 	if (vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_DRI3) {
 		if (!vk_bind_pixmap_dri3(vd, vi)) {
@@ -2041,9 +2285,6 @@ static image_handle vk_bind_pixmap(backend_t *base, xcb_pixmap_t pixmap,
 	} else {
 		assert(false);
 	}
-
-	bi->ewidth = vi->width;
-	bi->eheight = vi->height;
 
 	VkImageViewCreateInfo image_view_create_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
@@ -2110,104 +2351,10 @@ static image_handle vk_bind_pixmap(backend_t *base, xcb_pixmap_t pixmap,
 
 	vkUpdateDescriptorSets(vd->device, 1, &write_descriptor_set, 0, NULL);
 
-	if (vkWaitForFences(vd->device, 1, &vd->queue_submit_fence, VK_TRUE, UINT64_MAX)
-		!= VK_SUCCESS) {
-		log_error("Failed to wait for fences.");
-
-		goto err;
-	}
-
-	if (vkResetFences(vd->device, 1, &vd->queue_submit_fence) != VK_SUCCESS) {
-		log_error("Failed to reset fences.");
-
-		goto err;
-	}
-
-	if (vkResetCommandBuffer(vd->command_buffer, 0) != VK_SUCCESS) {
-		log_error("Failed to reset command buffer.");
-
-		goto err;
-	}
-
-	VkCommandBufferBeginInfo command_buffer_begin_info = {
-		.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
-		.pNext = NULL,
-		.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
-		.pInheritanceInfo = NULL
-	};
-
-	if (vkBeginCommandBuffer(vd->command_buffer, &command_buffer_begin_info) != VK_SUCCESS) {
-		log_error("Failed to begin command buffer.");
-
-		goto err;
-	}
-
-	VkImageMemoryBarrier image_memory_barrier = {
-		.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER,
-		.pNext = NULL,
-		.srcAccessMask = VK_ACCESS_NONE,
-		.dstAccessMask = VK_ACCESS_SHADER_READ_BIT,
-		.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED,
-		.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-		.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
-		.image = vi->image,
-		.subresourceRange = {
-			.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-			.baseMipLevel = 0,
-			.levelCount = 1,
-			.baseArrayLayer = 0,
-			.layerCount = 1
-		}
-	};
-
-	vkCmdPipelineBarrier(vd->command_buffer, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-		VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, NULL, 0, NULL, 1, &image_memory_barrier);
-
-	if (vkEndCommandBuffer(vd->command_buffer) != VK_SUCCESS) {
-		log_error("Failed to end command buffer.");
-
-		goto err;
-	}
-
-	VkSubmitInfo submit_info = {
-		.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
-		.pNext = NULL,
-		.waitSemaphoreCount = 0,
-		.pWaitSemaphores = NULL,
-		.pWaitDstStageMask = NULL,
-		.commandBufferCount = 1,
-		.pCommandBuffers = &vd->command_buffer,
-		.signalSemaphoreCount = 0,
-		.pSignalSemaphores = NULL
-	};
-
-	if (vkQueueSubmit(vd->queue, 1, &submit_info, vd->queue_submit_fence) != VK_SUCCESS) {
-		log_error("Failed to queue submit.");
-
-		goto err;
-	}
-
-	return (image_handle)bi;
+	return (image_handle)vi;
 
 err:
-	vk_release_image(base, (image_handle)bi);
-
-	return NULL;
-}
-
-static void vk_destroy_shadow_context(backend_t *base, struct backend_shadow_context *bsc) {
-	default_destroy_shadow_context(base, bsc);
-}
-
-static struct backend_shadow_context *vk_create_shadow_context(backend_t *base, double radius) {
-	return default_create_shadow_context(base, radius);
-}
-
-static image_handle vk_make_mask(backend_t *base, geometry_t size, const region_t *region) {
-	(void)base;
-	(void)size;
-	(void)region;
+	vk_release_image(base, (image_handle)vi);
 
 	return NULL;
 }
@@ -2218,24 +2365,34 @@ static int32_t vk_buffer_age(backend_t *base) {
 	return vd->buffer_ages[vd->swapchain_image_index];
 }
 
-static bool vk_set_image_property(backend_t *base, enum image_properties property,
-	image_handle image, const void *value) {
-	return default_set_image_property(base, property, image, value);
+static void vk_destroy_blur_context(backend_t *base attr_unused, void *context attr_unused) {
+
+}
+
+static void *vk_create_blur_context(backend_t *base attr_unused,
+	enum blur_method method attr_unused, enum backend_image_format format attr_unused,
+	void *args attr_unused) {
+	static bool dummy_context;
+
+	return &dummy_context;
 }
 
 struct backend_operations vulkan_ops = {
 	.init = vk_init,
 	.deinit = vk_deinit,
 	.prepare = vk_prepare,
-	.compose = vk_compose,
-	.fill = vk_fill,
+	.blit = vk_blit,
+	.copy_area = vk_copy_area,
+	.copy_area_quantize = vk_copy_area_quantize,
+	.clear = vk_clear,
 	.present = vk_present,
+	.new_image = vk_new_image,
 	.bind_pixmap = vk_bind_pixmap,
-	.create_shadow_context = vk_create_shadow_context,
-	.destroy_shadow_context = vk_destroy_shadow_context,
-	.make_mask = vk_make_mask,
+	.back_buffer = vk_back_buffer,
 	.release_image = vk_release_image,
+	.is_format_supported = vk_is_format_supported,
 	.buffer_age = vk_buffer_age,
 	.max_buffer_age = 5,
-	.set_image_property = vk_set_image_property
+	.create_blur_context = vk_create_blur_context,
+	.destroy_blur_context = vk_destroy_blur_context
 };

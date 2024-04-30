@@ -1,15 +1,15 @@
 #pragma once
 
 #define GLSL(version, ...) "#version " #version "\n" #__VA_ARGS__
-char *compose_vertex_shader = GLSL(460,
+char *blit_vertex_shader = GLSL(460,
 layout(location = 1) out vec2 texcoord;
-layout(push_constant) uniform ComposeData {
+layout(push_constant) uniform BlitData {
 	uvec2 viewport_dimensions;
 	int rect_x1;
 	int rect_y1;
 	int rect_x2;
 	int rect_y2;
-	ivec2 image_coords;
+	ivec2 origin;
 };
 
 void main() {
@@ -21,22 +21,22 @@ void main() {
 	);
 
 	if (gl_VertexIndex == 0) {
-		gl_Position = projection * vec4(rect_x1, rect_y1, 0.0f, 1.0f);
-		texcoord = vec2(rect_x1 - image_coords.x, rect_y1 - image_coords.y);
+		gl_Position = projection * vec4(rect_x1 + origin.x, rect_y1 + origin.y, 0.0f, 1.0f);
+		texcoord = vec2(rect_x1, rect_y1);
 	} else if (gl_VertexIndex == 1) {
-		gl_Position = projection * vec4(rect_x2, rect_y1, 0.0f, 1.0f);
-		texcoord = vec2(rect_x2 - image_coords.x, rect_y1 - image_coords.y);
+		gl_Position = projection * vec4(rect_x2 + origin.x, rect_y1 + origin.y, 0.0f, 1.0f);
+		texcoord = vec2(rect_x2, rect_y1);
 	} else if (gl_VertexIndex == 2) {
-		gl_Position = projection * vec4(rect_x1, rect_y2, 0.0f, 1.0f);
-		texcoord = vec2(rect_x1 - image_coords.x, rect_y2 - image_coords.y);
+		gl_Position = projection * vec4(rect_x1 + origin.x, rect_y2 + origin.y, 0.0f, 1.0f);
+		texcoord = vec2(rect_x1, rect_y2);
 	} else if (gl_VertexIndex == 3) {
-		gl_Position = projection * vec4(rect_x2, rect_y2, 0.0f, 1.0f);
-		texcoord = vec2(rect_x2 - image_coords.x, rect_y2 - image_coords.y);
+		gl_Position = projection * vec4(rect_x2 + origin.x, rect_y2 + origin.y, 0.0f, 1.0f);
+		texcoord = vec2(rect_x2, rect_y2);
 	}
 }
 );
 
-char *compose_fragment_shader = GLSL(460,
+char *blit_fragment_shader = GLSL(460,
 layout(location = 0) out vec4 color;
 layout(location = 1) in vec2 texcoord;
 layout(binding = 0) uniform sampler2D tex;
