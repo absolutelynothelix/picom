@@ -12,9 +12,9 @@
 PFN_vkGetMemoryFdPropertiesKHR vkGetMemoryFdPropertiesKHRProc;
 PFN_vkGetMemoryHostPointerPropertiesEXT vkGetMemoryHostPointerPropertiesEXTProc;
 
-enum bind_pixmap_strategy {
-	BIND_PIXMAP_STRATEGY_DRI3,
-	BIND_PIXMAP_STRATEGY_SHM
+enum bind_pixmap_method {
+	BIND_PIXMAP_METHOD_DRI3,
+	BIND_PIXMAP_METHOD_SHM
 };
 
 struct vulkan_data {
@@ -22,7 +22,7 @@ struct vulkan_data {
 	VkInstance instance;
 	xcb_connection_t *surface_connection;
 	VkSurfaceKHR surface;
-	enum bind_pixmap_strategy bind_pixmap_strategy;
+	enum bind_pixmap_method bind_pixmap_method;
 	VkPhysicalDevice physical_device;
 	VkDeviceSize min_imported_host_pointer_alignment;
 	uint32_t queue_family_index;
@@ -232,7 +232,7 @@ static void vk_select_physical_device(struct vulkan_data *vd, uint32_t physical_
 		log_info("Selected physical device %u: %s (%s).", i, physical_device_properties.deviceName,
 			vk_physical_device_type_to_string(physical_device_properties.deviceType));
 
-		if (vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_SHM) {
+		if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_SHM) {
 			VkPhysicalDeviceExternalMemoryHostPropertiesEXT external_memory_host_properties = {
 				.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_MEMORY_HOST_PROPERTIES_EXT,
 				.pNext = NULL
@@ -281,7 +281,7 @@ static bool vk_create_device(struct vulkan_data *vd, session_t *session) {
 	uint8_t common_extension_count = ARR_SIZE(common_extension_names);
 
 	if (session->dri3_exists) {
-		vd->bind_pixmap_strategy = BIND_PIXMAP_STRATEGY_DRI3;
+		vd->bind_pixmap_method = BIND_PIXMAP_METHOD_DRI3;
 
 		char *dri3_extension_names[] = {
 			VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
@@ -303,7 +303,7 @@ static bool vk_create_device(struct vulkan_data *vd, session_t *session) {
 	}
 
 	if (vd->physical_device == VK_NULL_HANDLE && session->shm_exists) {
-		vd->bind_pixmap_strategy = BIND_PIXMAP_STRATEGY_SHM;
+		vd->bind_pixmap_method = BIND_PIXMAP_METHOD_SHM;
 
 		char *shm_extension_names[] = {
 			VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME
@@ -330,8 +330,8 @@ static bool vk_create_device(struct vulkan_data *vd, session_t *session) {
 		return false;
 	}
 
-	log_info("Binding pixmaps using the X %s extension.", vd->bind_pixmap_strategy
-		== BIND_PIXMAP_STRATEGY_DRI3 ? "DRI3" : "SHM");
+	log_info("Binding pixmaps using the X %s extension.", vd->bind_pixmap_method
+		== BIND_PIXMAP_METHOD_DRI3 ? "DRI3" : "SHM");
 
 	uint32_t queue_family_property_count;
 	vkGetPhysicalDeviceQueueFamilyProperties(vd->physical_device, &queue_family_property_count,
@@ -432,11 +432,11 @@ if (!procedure##Proc) { \
 	log_error("Failed to get " #procedure " device procedure address."); \
 	return false; \
 }
-	if (vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_DRI3) {
+	if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_DRI3) {
 		get_device_procedure_address(vkGetMemoryFdPropertiesKHR);
 	}
 
-	if (vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_SHM) {
+	if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_SHM) {
 		get_device_procedure_address(vkGetMemoryHostPointerPropertiesEXT);
 	}
 #undef get_device_procedure_address
@@ -1468,7 +1468,7 @@ static bool vk_blit(backend_t *base, struct coord origin, image_handle image,
 		return true;
 	}
 
-	if (source->pixmap != XCB_NONE && vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_SHM) {
+	if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_SHM && source->pixmap != XCB_NONE) {
 		int16_t x = 0;
 		int16_t y = 0;
 		uint16_t width = source->width;
@@ -2245,7 +2245,7 @@ static xcb_pixmap_t vk_release_image(backend_t *base, image_handle image) {
 		vkDestroyImageView(vd->device, vi->image_view, NULL);
 	}
 
-	if (vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_SHM) {
+	if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_SHM) {
 		vk_release_image_shm(vd, vi);
 	}
 
@@ -2274,11 +2274,11 @@ static image_handle vk_bind_pixmap(backend_t *base, xcb_pixmap_t pixmap,
 	vi->has_alpha = visual_info.alpha_size > 0;
 	vi->pixmap = pixmap;
 
-	if (vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_DRI3) {
+	if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_DRI3) {
 		if (!vk_bind_pixmap_dri3(vd, vi)) {
 			goto err;
 		}
-	} else if (vd->bind_pixmap_strategy == BIND_PIXMAP_STRATEGY_SHM) {
+	} else if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_SHM) {
 		if (!vk_bind_pixmap_shm(vd, vi)) {
 			goto err;
 		}
