@@ -1247,6 +1247,11 @@ static void vk_transit_image_layout(struct vulkan_data *vd, struct vulkan_image 
 				| VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
 			break;
 
+		case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+			src_stage_mask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+			src_access_mask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+			break;
+
 		case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
 			src_stage_mask = VK_PIPELINE_STAGE_2_BLIT_BIT;
 			src_access_mask = VK_ACCESS_2_TRANSFER_READ_BIT;
