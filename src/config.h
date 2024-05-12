@@ -122,6 +122,7 @@ struct debug_options {
 	/// ensuring no matter what buffer age apitrace gets during replay, the result
 	/// will be the same.
 	int consistent_buffer_age;
+	int disable_dri3;
 };
 
 extern struct debug_options global_debug_options;

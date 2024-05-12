@@ -2271,7 +2271,7 @@ static session_t *session_init(int argc, char **argv, Display *dpy,
 	}
 
 	ext_info = xcb_get_extension_data(ps->c.c, &xcb_dri3_id);
-	if (ext_info && ext_info->present) {
+	if (ext_info && ext_info->present && !global_debug_options.disable_dri3) {
 		xcb_dri3_query_version_reply_t *r = xcb_dri3_query_version_reply(
 		    ps->c.c,
 		    xcb_dri3_query_version(ps->c.c, XCB_DRI3_MAJOR_VERSION,
