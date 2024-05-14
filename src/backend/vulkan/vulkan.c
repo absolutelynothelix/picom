@@ -1258,7 +1258,8 @@ static void vk_transit_image_layout(struct vulkan_data *vd, struct vulkan_image 
 			break;
 
 		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-			src_stage_mask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT;
+			src_stage_mask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT
+				| VK_PIPELINE_STAGE_2_CLEAR_BIT;
 			src_access_mask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
 			break;
 
@@ -1286,7 +1287,8 @@ static void vk_transit_image_layout(struct vulkan_data *vd, struct vulkan_image 
 			break;
 
 		case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
-			dst_stage_mask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT;
+			dst_stage_mask = VK_PIPELINE_STAGE_2_COPY_BIT | VK_PIPELINE_STAGE_2_BLIT_BIT
+				| VK_PIPELINE_STAGE_2_CLEAR_BIT;
 			dst_access_mask = VK_ACCESS_2_TRANSFER_WRITE_BIT;
 			break;
 
