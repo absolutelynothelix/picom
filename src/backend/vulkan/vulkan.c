@@ -1453,7 +1453,7 @@ static bool vk_is_format_supported(backend_t *base attr_unused,
 	return true;
 }
 
-static bool vk_blit(backend_t *base, struct coord origin, image_handle image,
+static bool vk_blit(backend_t *base, struct ivec2 origin, image_handle image,
 	struct backend_blit_args *args) {
 	auto vd = (struct vulkan_data *)base;
 
@@ -1588,7 +1588,7 @@ static bool vk_blit(backend_t *base, struct coord origin, image_handle image,
 	return true;
 }
 
-static bool vk_copy_area(backend_t *base, struct coord origin, image_handle _destination, image_handle _source,
+static bool vk_copy_area(backend_t *base, struct ivec2 origin, image_handle _destination, image_handle _source,
 	const region_t *_region) {
 	auto vd = (struct vulkan_data *)base;
 
@@ -1665,7 +1665,7 @@ static bool vk_copy_area(backend_t *base, struct coord origin, image_handle _des
 	return true;
 }
 
-static bool vk_copy_area_quantize(backend_t *base, struct coord origin, image_handle destination, image_handle source,
+static bool vk_copy_area_quantize(backend_t *base, struct ivec2 origin, image_handle destination, image_handle source,
 	const region_t *region) {
 	return vk_copy_area(base, origin, destination, source, region);
 }
@@ -1701,14 +1701,14 @@ static bool vk_clear(backend_t *base, image_handle _image, struct color color) {
 }
 
 static image_handle vk_new_image(backend_t *base, enum backend_image_format format attr_unused,
-	geometry_t geometry) {
+	ivec2 size) {
 	auto vd = (struct vulkan_data *)base;
 
 	struct vulkan_image *vi = ccalloc(1, struct vulkan_image);
 	vi->has_alpha = true;
 	vi->pixmap = XCB_NONE;
-	vi->width = (uint16_t)geometry.width;
-	vi->height = (uint16_t)geometry.height;
+	vi->width = (uint16_t)size.x;
+	vi->height = (uint16_t)size.y;
 	vi->image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	VkImageCreateInfo image_create_info = {
