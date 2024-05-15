@@ -1870,25 +1870,26 @@ static bool vk_bind_pixmap_dri3(struct vulkan_data *vd, struct vulkan_image *vi)
 	vi->width = r->width;
 	vi->height = r->height;
 
-	assert(r->nfd == 1);
-
 	uint32_t *offsets = xcb_dri3_buffers_from_pixmap_offsets(r);
 	uint32_t *strides = xcb_dri3_buffers_from_pixmap_strides(r);
 
-	VkSubresourceLayout subresource_layout = {
-		.offset = offsets[0],
-		.size = 0,
-		.rowPitch = strides[0],
-		.arrayPitch = 0,
-		.depthPitch = 0
-	};
+	VkSubresourceLayout *subresource_layouts = ccalloc(r->nfd, VkSubresourceLayout);
+	for (uint8_t i = 0; i < r->nfd; i++) {
+		subresource_layouts[i] = (VkSubresourceLayout){
+			.offset = offsets[i],
+			.size = 0,
+			.rowPitch = strides[i],
+			.arrayPitch = 0,
+			.depthPitch = 0
+		};
+	}
 
 	VkImageDrmFormatModifierExplicitCreateInfoEXT image_drm_format_modifier_explicit_create_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
 		.pNext = NULL,
 		.drmFormatModifier = r->modifier,
 		.drmFormatModifierPlaneCount = r->nfd,
-		.pPlaneLayouts = &subresource_layout
+		.pPlaneLayouts = subresource_layouts
 	};
 
 	VkExternalMemoryImageCreateInfo external_memory_image_create_info = {
