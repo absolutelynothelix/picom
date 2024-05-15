@@ -1748,7 +1748,7 @@ static image_handle vk_new_image(backend_t *base, enum backend_image_format form
 
 	uint32_t memory_type_index = UINT32_MAX;
 	for (uint32_t i = 0; i < physical_device_memory_properties.memoryTypeCount; i++) {
-		bool is_supported = memory_requirements.memoryTypeBits & (i << 1);
+		bool is_supported = memory_requirements.memoryTypeBits & (1 << i);
 		bool has_device_local_bit_set
 			= physical_device_memory_properties.memoryTypes[i].propertyFlags
 			& VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
