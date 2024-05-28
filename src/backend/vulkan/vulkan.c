@@ -1184,6 +1184,7 @@ static void vk_deinit(backend_t *base) {
 static backend_t *vk_init(session_t *session, xcb_window_t window) {
 	struct vulkan_data *vd = ccalloc(1, struct vulkan_data);
 	init_backend_base(&vd->base, session);
+	vd->base.ops = vulkan_ops;
 
 	if (!vk_create_instance(vd)) {
 		goto err;
@@ -1453,8 +1454,8 @@ static bool vk_is_format_supported(backend_t *base attr_unused,
 	return true;
 }
 
-static bool vk_blit(backend_t *base, struct ivec2 origin, image_handle image,
-	struct backend_blit_args *args) {
+static bool vk_blit(backend_t *base, ivec2 origin, image_handle image,
+	const struct backend_blit_args *args) {
 	auto vd = (struct vulkan_data *)base;
 
 	auto source = (struct vulkan_image *)args->source_image;
@@ -1462,8 +1463,7 @@ static bool vk_blit(backend_t *base, struct ivec2 origin, image_handle image,
 
 	pixman_region32_t region;
 	pixman_region32_init_rect(&region, 0, 0, destination->width, destination->height);
-	pixman_region32_translate(&region, -origin.x, -origin.y);
-	pixman_region32_intersect(&region, &region, &args->mask->region);
+	pixman_region32_intersect(&region, &region, args->target_mask);
 
 	int32_t n_rects;
 	pixman_box32_t *rects = pixman_region32_rectangles(&region, &n_rects);
@@ -1524,8 +1524,8 @@ static bool vk_blit(backend_t *base, struct ivec2 origin, image_handle image,
 
 	VkRect2D render_area = {
 		.offset = {
-			.x = origin.x + extents->x1,
-			.y = origin.y + extents->y1
+			.x = extents->x1,
+			.y = extents->y1
 		},
 		.extent = {
 			.width = (uint32_t)(extents->x2 - extents->x1),
@@ -1575,9 +1575,8 @@ static bool vk_blit(backend_t *base, struct ivec2 origin, image_handle image,
 	vkCmdPushConstants(vd->command_buffer, vd->blit_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT, 24,
 		8, (int32_t[]){origin.x, origin.y});
 	for (uint32_t i = 0; i < (uint32_t)n_rects; i++) {
-		pixman_box32_t rect = region_translate_rect(rects[i], args->mask->origin);
 		vkCmdPushConstants(vd->command_buffer, vd->blit_pipeline_layout, VK_SHADER_STAGE_VERTEX_BIT,
-			8, 16, (int32_t[]){rect.x1, rect.y1, rect.x2, rect.y2});
+			8, 16, (int32_t[]){rects[i].x1, rects[i].y1, rects[i].x2, rects[i].y2});
 		vkCmdDraw(vd->command_buffer, 4, 1, 0, 0);
 	}
 
@@ -1588,7 +1587,7 @@ static bool vk_blit(backend_t *base, struct ivec2 origin, image_handle image,
 	return true;
 }
 
-static bool vk_copy_area(backend_t *base, struct ivec2 origin, image_handle _destination, image_handle _source,
+static bool vk_copy_area(backend_t *base, ivec2 origin, image_handle _destination, image_handle _source,
 	const region_t *_region) {
 	auto vd = (struct vulkan_data *)base;
 
@@ -1665,7 +1664,7 @@ static bool vk_copy_area(backend_t *base, struct ivec2 origin, image_handle _des
 	return true;
 }
 
-static bool vk_copy_area_quantize(backend_t *base, struct ivec2 origin, image_handle destination, image_handle source,
+static bool vk_copy_area_quantize(backend_t *base, ivec2 origin, image_handle destination, image_handle source,
 	const region_t *region) {
 	return vk_copy_area(base, origin, destination, source, region);
 }
@@ -1707,8 +1706,8 @@ static image_handle vk_new_image(backend_t *base, enum backend_image_format form
 	struct vulkan_image *vi = ccalloc(1, struct vulkan_image);
 	vi->has_alpha = true;
 	vi->pixmap = XCB_NONE;
-	vi->width = (uint16_t)size.x;
-	vi->height = (uint16_t)size.y;
+	vi->width = (uint16_t)size.width;
+	vi->height = (uint16_t)size.height;
 	vi->image_layout = VK_IMAGE_LAYOUT_UNDEFINED;
 
 	VkImageCreateInfo image_create_info = {
@@ -2373,6 +2372,10 @@ static int32_t vk_buffer_age(backend_t *base) {
 	return vd->buffer_ages[vd->swapchain_image_index];
 }
 
+static int32_t vk_max_buffer_age(backend_t *base attr_unused) {
+	return 5;
+}
+
 static void vk_destroy_blur_context(backend_t *base attr_unused, void *context attr_unused) {
 
 }
@@ -2385,7 +2388,7 @@ static void *vk_create_blur_context(backend_t *base attr_unused,
 	return &dummy_context;
 }
 
-struct backend_operations vulkan_ops = {
+static const struct backend_operations vulkan_ops = {
 	.init = vk_init,
 	.deinit = vk_deinit,
 	.prepare = vk_prepare,
@@ -2400,7 +2403,14 @@ struct backend_operations vulkan_ops = {
 	.release_image = vk_release_image,
 	.is_format_supported = vk_is_format_supported,
 	.buffer_age = vk_buffer_age,
-	.max_buffer_age = 5,
+	.max_buffer_age = vk_max_buffer_age,
 	.create_blur_context = vk_create_blur_context,
 	.destroy_blur_context = vk_destroy_blur_context
 };
+
+BACKEND_ENTRYPOINT(vulkan_register) {
+	if (!backend_register(PICOM_BACKEND_MAJOR, PICOM_BACKEND_MINOR, "vulkan", vulkan_ops.init,
+		true)) {
+		log_error("Failed to register backend.");
+	}
+}
