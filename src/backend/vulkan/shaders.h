@@ -21,17 +21,17 @@ void main() {
 	);
 
 	if (gl_VertexIndex == 0) {
-		gl_Position = projection * vec4(rect_x1 + origin.x, rect_y1 + origin.y, 0.0f, 1.0f);
-		texcoord = vec2(rect_x1, rect_y1);
+		gl_Position = projection * vec4(rect_x1, rect_y1, 0.0f, 1.0f);
+		texcoord = vec2(rect_x1 - origin.x, rect_y1 - origin.y);
 	} else if (gl_VertexIndex == 1) {
-		gl_Position = projection * vec4(rect_x2 + origin.x, rect_y1 + origin.y, 0.0f, 1.0f);
-		texcoord = vec2(rect_x2, rect_y1);
+		gl_Position = projection * vec4(rect_x2, rect_y1, 0.0f, 1.0f);
+		texcoord = vec2(rect_x2 - origin.x, rect_y1 - origin.y);
 	} else if (gl_VertexIndex == 2) {
-		gl_Position = projection * vec4(rect_x1 + origin.x, rect_y2 + origin.y, 0.0f, 1.0f);
-		texcoord = vec2(rect_x1, rect_y2);
+		gl_Position = projection * vec4(rect_x1, rect_y2, 0.0f, 1.0f);
+		texcoord = vec2(rect_x1 - origin.x, rect_y2 - origin.y);
 	} else if (gl_VertexIndex == 3) {
-		gl_Position = projection * vec4(rect_x2 + origin.x, rect_y2 + origin.y, 0.0f, 1.0f);
-		texcoord = vec2(rect_x2, rect_y2);
+		gl_Position = projection * vec4(rect_x2, rect_y2, 0.0f, 1.0f);
+		texcoord = vec2(rect_x2 - origin.x, rect_y2 - origin.y);
 	}
 }
 );
