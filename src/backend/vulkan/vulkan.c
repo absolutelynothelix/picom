@@ -1512,6 +1512,7 @@ static bool vk_blit(backend_t *base, ivec2 origin, image_handle image,
 	vk_maybe_acquire_image(vd, source);
 	vk_transit_image_layout(vd, source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 
+	assert(destination->pixmap == XCB_NONE);
 	vk_transit_image_layout(vd, destination, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 	pixman_box32_t *extents = pixman_region32_extents(&region);
@@ -1602,6 +1603,9 @@ static bool vk_copy_area(backend_t *base, ivec2 origin, image_handle _destinatio
 
 		return true;
 	}
+
+	assert(source->pixmap == XCB_NONE);
+	assert(destination->pixmap == XCB_NONE);
 
 	VkImageBlit *image_blits = ccalloc(n_rects, VkImageBlit);
 	for (uint32_t i = 0; i < (uint32_t)n_rects; i++) {
