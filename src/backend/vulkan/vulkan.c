@@ -1,3 +1,4 @@
+#include <libdrm/drm_fourcc.h>
 #include <shaderc/shaderc.h>
 #include <sys/shm.h>
 #include <vulkan/vk_enum_string_helper.h>
@@ -1880,6 +1881,8 @@ static bool vk_bind_pixmap_dri3(struct vulkan_data *vd, struct vulkan_image *vi)
 			.depthPitch = 0
 		};
 	}
+
+	assert(r->modifier != DRM_FORMAT_MOD_INVALID);
 
 	VkImageDrmFormatModifierExplicitCreateInfoEXT image_drm_format_modifier_explicit_create_info = {
 		.sType = VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,

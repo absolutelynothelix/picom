@@ -98,8 +98,9 @@ endif
 if get_option('vulkan')
 	cflags += ['-DCONFIG_VULKAN', '-DVK_USE_PLATFORM_XCB_KHR']
 	deps += [
-		dependency('vulkan', required: true),
-		dependency('shaderc', required: true)
+		dependency('libdrm', required: true),
+		dependency('shaderc', required: true),
+		dependency('vulkan', required: true)
 	]
 endif
 
