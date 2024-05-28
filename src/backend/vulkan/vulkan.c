@@ -1,5 +1,6 @@
 #include <shaderc/shaderc.h>
 #include <sys/shm.h>
+#include <vulkan/vk_enum_string_helper.h>
 #include <vulkan/vulkan.h>
 #include <xcb/dri3.h>
 
@@ -75,21 +76,6 @@ static bool vk_has_extension(uint32_t property_count, VkExtensionProperties *pro
 
 	return false;
 }
-
-#define to_string_case(x) case x: return #x;
-#define to_string_default default: unreachable();
-static char *vk_physical_device_type_to_string(VkPhysicalDeviceType physical_device_type) {
-	switch (physical_device_type) {
-		to_string_case(VK_PHYSICAL_DEVICE_TYPE_OTHER)
-		to_string_case(VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
-		to_string_case(VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU)
-		to_string_case(VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU)
-		to_string_case(VK_PHYSICAL_DEVICE_TYPE_CPU)
-		to_string_default
-	}
-}
-#undef to_string_default
-#undef to_string_case
 
 static bool vk_create_instance(struct vulkan_data *vd) {
 	const char *enabled_extension_names[] = {
@@ -230,7 +216,7 @@ static void vk_select_physical_device(struct vulkan_data *vd, uint32_t physical_
 		vd->physical_device = physical_devices[i];
 
 		log_info("Selected physical device %u: %s (%s).", i, physical_device_properties.deviceName,
-			vk_physical_device_type_to_string(physical_device_properties.deviceType));
+			string_VkPhysicalDeviceType(physical_device_properties.deviceType));
 
 		if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_SHM) {
 			VkPhysicalDeviceExternalMemoryHostPropertiesEXT external_memory_host_properties = {
