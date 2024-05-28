@@ -1454,6 +1454,54 @@ static bool vk_is_format_supported(backend_t *base attr_unused,
 	return true;
 }
 
+static bool vk_maybe_acquire_image(struct vulkan_data *vd, struct vulkan_image *vi) {
+	if (vi->pixmap == XCB_NONE) {
+		return true;
+	}
+
+	if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_SHM) {
+		xcb_shm_get_image_reply_t *r = xcb_shm_get_image_reply(vd->base.c->c, xcb_shm_get_image(
+			vd->base.c->c, vi->pixmap, 0, 0, vi->width, vi->height, UINT32_MAX,
+			XCB_IMAGE_FORMAT_Z_PIXMAP, vi->shm_segment, 0), NULL);
+		if (!r) {
+			log_error("Failed to read image data into shared memory image.");
+
+			return false;
+		}
+
+		free(r);
+
+		vk_transit_image_layout(vd, vi, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+
+		VkBufferImageCopy buffer_image_copy = {
+			.bufferOffset = 0,
+			.bufferRowLength = 0,
+			.bufferImageHeight = 0,
+			.imageSubresource = {
+				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
+				.mipLevel = 0,
+				.baseArrayLayer = 0,
+				.layerCount = 1
+			},
+			.imageOffset = {
+				.x = 0,
+				.y = 0,
+				.z = 0
+			},
+			.imageExtent = {
+				.width = vi->width,
+				.height = vi->height,
+				.depth = 1
+			}
+		};
+
+		vkCmdCopyBufferToImage(vd->command_buffer, vi->staging_buffer, vi->image,
+			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &buffer_image_copy);
+	}
+
+	return true;
+}
+
 static bool vk_blit(backend_t *base, ivec2 origin, image_handle image,
 	const struct backend_blit_args *args) {
 	auto vd = (struct vulkan_data *)base;
@@ -1475,49 +1523,9 @@ static bool vk_blit(backend_t *base, ivec2 origin, image_handle image,
 		return true;
 	}
 
-	if (vd->bind_pixmap_method == BIND_PIXMAP_METHOD_SHM && source->pixmap != XCB_NONE) {
-		int16_t x = 0;
-		int16_t y = 0;
-		uint16_t width = source->width;
-		uint16_t height = source->height;
-		xcb_shm_get_image_reply_t *r = xcb_shm_get_image_reply(base->c->c, xcb_shm_get_image(
-			base->c->c, source->pixmap, x, y, width, height, UINT32_MAX, XCB_IMAGE_FORMAT_Z_PIXMAP,
-			source->shm_segment, 0), NULL);
-		if (!r) {
-			log_error("Failed to read image data into shared memory image.");
-		} else {
-			free(r);
-		}
-
-		vk_transit_image_layout(vd, source, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-
-		VkBufferImageCopy buffer_image_copy = {
-			.bufferOffset = 0,
-			.bufferRowLength = 0,
-			.bufferImageHeight = 0,
-			.imageSubresource = {
-				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
-				.mipLevel = 0,
-				.baseArrayLayer = 0,
-				.layerCount = 1
-			},
-			.imageOffset = {
-				.x = x,
-				.y = y,
-				.z = 0
-			},
-			.imageExtent = {
-				.width = width,
-				.height = height,
-				.depth = 1
-			}
-		};
-
-		vkCmdCopyBufferToImage(vd->command_buffer, source->staging_buffer, source->image,
-			VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &buffer_image_copy);
-	}
-
+	vk_maybe_acquire_image(vd, source);
 	vk_transit_image_layout(vd, source, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+
 	vk_transit_image_layout(vd, destination, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 
 	pixman_box32_t *extents = pixman_region32_extents(&region);
