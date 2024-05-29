@@ -1605,7 +1605,7 @@ static bool vk_copy_area(backend_t *base, ivec2 origin, image_handle _destinatio
 		return true;
 	}
 
-	assert(source->pixmap == XCB_NONE);
+	vk_maybe_acquire_image(vd, source);
 	assert(destination->pixmap == XCB_NONE);
 
 	VkImageBlit *image_blits = ccalloc(n_rects, VkImageBlit);
