@@ -1608,26 +1608,19 @@ static bool vk_copy_area(backend_t *base, ivec2 origin, image_handle _destinatio
 	vk_maybe_acquire_image(vd, source);
 	assert(destination->pixmap == XCB_NONE);
 
-	VkImageBlit *image_blits = ccalloc(n_rects, VkImageBlit);
+	VkImageCopy *image_copies = ccalloc(n_rects, VkImageCopy);
 	for (uint32_t i = 0; i < (uint32_t)n_rects; i++) {
-		image_blits[i] = (VkImageBlit){
+		image_copies[i] = (VkImageCopy){
 			.srcSubresource = {
 				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
 				.mipLevel = 0,
 				.baseArrayLayer = 0,
 				.layerCount = 1
 			},
-			.srcOffsets = {
-				{
-					.x = rects[i].x1,
-					.y = rects[i].y1,
-					.z = 0
-				},
-				{
-					.x = rects[i].x2,
-					.y = rects[i].y2,
-					.z = 1
-				}
+			.srcOffset = {
+				.x = rects[i].x1,
+				.y = rects[i].y1,
+				.z = 0
 			},
 			.dstSubresource = {
 				.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT,
@@ -1635,17 +1628,15 @@ static bool vk_copy_area(backend_t *base, ivec2 origin, image_handle _destinatio
 				.baseArrayLayer = 0,
 				.layerCount = 1
 			},
-			.dstOffsets = {
-				{
-					.x = origin.x + rects[i].x1,
-					.y = origin.y + rects[i].y1,
-					.z = 0
-				},
-				{
-					.x = origin.x + rects[i].x2,
-					.y = origin.y + rects[i].y2,
-					.z = 1
-				}
+			.dstOffset = {
+				.x = origin.x + rects[i].x1,
+				.y = origin.y + rects[i].y1,
+				.z = 0
+			},
+			.extent = {
+				.width = (uint32_t)(rects[i].x2 - rects[i].x1),
+				.height = (uint32_t)(rects[i].y2 - rects[i].y1),
+				.depth = 1
 			}
 		};
 	}
@@ -1653,10 +1644,10 @@ static bool vk_copy_area(backend_t *base, ivec2 origin, image_handle _destinatio
 	vk_transit_image_layout(vd, source, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
 	vk_transit_image_layout(vd, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
 
-	vkCmdBlitImage(vd->command_buffer, source->image, source->image_layout, destination->image,
-		destination->image_layout, (uint32_t)n_rects, image_blits, VK_FILTER_NEAREST);
+	vkCmdCopyImage(vd->command_buffer, source->image, source->image_layout, destination->image,
+		destination->image_layout, (uint32_t)n_rects, image_copies);
 
-	free(image_blits);
+	free(image_copies);
 
 	pixman_region32_fini(&region);
 
@@ -2303,9 +2294,9 @@ static image_handle vk_bind_pixmap(backend_t *base, xcb_pixmap_t pixmap,
 		.viewType = VK_IMAGE_VIEW_TYPE_2D,
 		.format = VK_FORMAT_R8G8B8A8_UNORM,
 		.components = {
-			.r = VK_COMPONENT_SWIZZLE_B,
+			.r = VK_COMPONENT_SWIZZLE_R,
 			.g = VK_COMPONENT_SWIZZLE_G,
-			.b = VK_COMPONENT_SWIZZLE_R,
+			.b = VK_COMPONENT_SWIZZLE_B,
 			.a = vi->has_alpha ? VK_COMPONENT_SWIZZLE_A : VK_COMPONENT_SWIZZLE_ONE
 		},
 		.subresourceRange = {
