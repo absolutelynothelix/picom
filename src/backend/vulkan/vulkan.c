@@ -520,7 +520,7 @@ static bool vk_create_swapchain(struct vulkan_data *vd, bool is_vsync_enabled) {
 	vkGetPhysicalDeviceSurfaceFormatsKHR(vd->physical_device, vd->surface, &surface_format_count,
 		surface_formats);
 
-	VkSurfaceFormatKHR surface_format;
+	VkSurfaceFormatKHR surface_format = {};
 	for (uint32_t i = 0; i < surface_format_count; i++) {
 		if (surface_formats[i].format == VK_FORMAT_B8G8R8A8_UNORM) {
 			surface_format = surface_formats[i];
