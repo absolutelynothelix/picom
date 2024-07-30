@@ -1921,6 +1921,8 @@ static bool vk_bind_pixmap_dri3(struct vulkan_data *vd, struct vulkan_image *vi)
 		return false;
 	}
 
+	free(subresource_layouts);
+
 	int32_t *buffers = xcb_dri3_buffers_from_pixmap_buffers(r);
 
 	VkImportMemoryFdInfoKHR import_memory_fd_info = {
