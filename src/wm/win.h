@@ -533,7 +533,8 @@ win_region_remove_corners(const struct win *w, ivec2 origin, region_t *res) {
 	    {1, 0},
 	    {1, 1},
 	};
-	int corner_radius = (int)win_options(w).corner_radius;
+	// XXX(absolutelynothelix): a not very smart assumption.
+	int corner_radius = (int)(win_options(w).corner_radius * 1.5);
 	rect_t rectangles[4];
 	for (size_t i = 0; i < ARR_SIZE(corner_index); i++) {
 		rectangles[i] = (rect_t){
