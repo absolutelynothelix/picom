@@ -446,6 +446,17 @@ err:
 	return NULL;
 }
 
+static bool glx_blit(backend_t *base, ivec2 origin, image_handle target,
+                     const struct backend_blit_args *args) {
+	auto inner = (struct gl_texture *)args->source_image;
+	if (global_debug_options.always_rebind_pixmap && inner->user_data) {
+		glXBindTexImageEXT(base->c->dpy, *(GLXPixmap *)inner->user_data,
+		                   GLX_FRONT_LEFT_EXT, NULL);
+	}
+
+	return gl_blit(base, origin, target, args);
+}
+
 static bool glx_present(backend_t *base) {
 	struct _glx_data *gd = (void *)base;
 	gl_finish_render(&gd->gl);
@@ -518,7 +529,7 @@ const struct backend_operations glx_ops = {
     .apply_alpha = gl_apply_alpha,
     .back_buffer = gl_back_buffer,
     .bind_pixmap = glx_bind_pixmap,
-    .blit = gl_blit,
+    .blit = glx_blit,
     .blur = gl_blur,
     .clear = gl_clear,
     .copy_area = gl_copy_area,
